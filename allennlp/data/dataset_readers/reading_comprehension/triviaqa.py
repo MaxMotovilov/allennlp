@@ -499,7 +499,7 @@ class TriviaQaReader(DatasetReader):
             paragraph_tokens = [[truncate_token(token, self._max_token_length) for token in tokens]
                                 for tokens in paragraph_tokens]
 
-        if token_spans is None:
+        if token_spans is None and answer_texts is not None:
             token_spans = [util.find_valid_answer_spans(paragraph_tokens_i, answer_texts)
                            for paragraph_tokens_i in paragraph_tokens]
         if question_tokens is None:
