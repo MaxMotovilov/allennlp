@@ -278,8 +278,11 @@ class DocumentQa(Model):
         output_dict = {
                 "span_start_logits": span_start_logits,
                 "span_start_probs": span_start_probs,
+                "paragraph_span_start_logits": paragraph_span_start_logits,
+                "paragraph_span_end_logits": paragraph_span_end_logits,
                 "span_end_logits": span_end_logits,
                 "span_end_probs": span_end_probs,
+                "best_para": [metadata[0]['paragraph_texts'][best_paragraph_word_span.data.cpu().numpy()[0][0]]],
                 "best_span": best_paragraph_word_span
         }
 

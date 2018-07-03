@@ -38,7 +38,8 @@ predictions using a trained model and its :class:`~allennlp.service.predictors.p
     --predictor PREDICTOR
                             optionally specify a specific predictor to use
 """
-
+import json
+import logging
 import argparse
 from contextlib import ExitStack
 import sys
@@ -48,6 +49,8 @@ from allennlp.commands.subcommand import Subcommand
 from allennlp.common.checks import check_for_gpu
 from allennlp.models.archival import load_archive
 from allennlp.predictors import Predictor
+
+logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
 
 class PredictMP(Subcommand):
     def add_subparser(self, name: str, parser: argparse._SubParsersAction) -> argparse.ArgumentParser:
@@ -86,7 +89,7 @@ class PredictMP(Subcommand):
 
         return subparser
 
-def _get_predictors(args: argparse.Namespace) -> Predictor:
+def _get_predictors(args: argparse.Namespace) -> list:
     check_for_gpu(args.cuda_device)
     archive = load_archive(args.archive_file,
                            weights_file=args.weights_file,
@@ -102,15 +105,20 @@ def _get_predictors(args: argparse.Namespace) -> Predictor:
 
     return Predictors
 
-def _run(predictor: Predictor,
+def _run(predictors: list,
          input_file: IO,
          output_file: Optional[IO],
          batch_size: int,
          print_to_console: bool) -> None:
 
+    predictor = predictors[0]
+    bidaf_predictor = predictors[1]
+
     def _run_predictor(batch_data):
         if len(batch_data) == 1:
+            logger.info("Running multi-para BiDAF")
             result = predictor.predict_json(batch_data[0])
+            logger.info("Multi-para BiDAF complete")
             # Batch results return a list of json objects, so in
             # order to iterate over the result below we wrap this in a list.
             results = [result]
@@ -118,12 +126,22 @@ def _run(predictor: Predictor,
             results = predictor.predict_batch_json(batch_data)
 
         for model_input, output in zip(batch_data, results):
+            data = {}
+            data['question'] = model_input['question']
+            data['passage'] = output['best_para']
+
+            logger.info("Running BiDAF")
+            result = bidaf_predictor.predict_json(data)
+            logger.info("BiDAF complete")
+            string_output1 = bidaf_predictor.dump_line(result)
             string_output = predictor.dump_line(output)
             if print_to_console:
-                print("input: ", model_input)
-                print("prediction: ", string_output)
+                #print("MP input: ", model_input)
+                #print("MP prediction: ", string_output)
+                print("BIDAF input: ", data)
+                #print("BIDAF prediction: ", string_output1)
             if output_file:
-                output_file.write(string_output)
+                output_file.write(string_output + "\n" + string_output1 + "\r\n")
 
     batch_json_data = []
     for line in input_file:
@@ -142,7 +160,7 @@ def _run(predictor: Predictor,
 
 
 def _predict(args: argparse.Namespace) -> None:
-    predictor = _get_predictor(args)
+    predictors = _get_predictors(args)
     output_file = None
 
     if args.silent and not args.output_file:
@@ -156,7 +174,7 @@ def _predict(args: argparse.Namespace) -> None:
         if args.output_file:
             output_file = stack.enter_context(args.output_file)  # type: ignore
 
-        _run(predictor,
+        _run(predictors,
              input_file,
              output_file,
              args.batch_size,
