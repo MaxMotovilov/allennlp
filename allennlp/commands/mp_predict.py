@@ -1,5 +1,5 @@
 """
-The ``predicitmp`` subcommand allows you to make bulk JSON-to-JSON
+The ``predictmp`` subcommand allows you to make bulk JSON-to-JSON
 predictions using a trained model and its :class:`~allennlp.service.predictors.predictor.Predictor` wrapper.
 
 .. code-block:: bash
@@ -37,6 +37,9 @@ predictions using a trained model and its :class:`~allennlp.service.predictors.p
                             additional packages to include
     --predictor PREDICTOR
                             optionally specify a specific predictor to use
+
+    --try-top N
+                            run top N results of multi-para through BiDAF (defaults to 1)
 """
 import json
 import logging
@@ -85,6 +88,8 @@ class PredictMP(Subcommand):
                                type=str,
                                help='optionally specify a specific predictor to use')
 
+        subparser.add_argument('--try-top', type=int, default=1, help='number of top choices from multi-para to run through BiDAF')
+
         subparser.set_defaults(func=_predict)
 
         return subparser
@@ -105,11 +110,44 @@ def _get_predictors(args: argparse.Namespace) -> list:
 
     return Predictors
 
+def uniquePar():
+    s = set()
+    def test( item ):
+        if item[1] in s: return False
+        s.add( item[1] )
+        return True
+    return test
+
+def top_spans( starts, ends, n ):
+# O( N log N ) where N = Np * Lp * (Lp-1) / 2
+    assert len(starts) == len(ends)
+    return list(filter(
+               uniquePar(),
+               sorted((
+                  (starts[p][i] + ends[p][j], p, i, j)
+                    for p in range(len(starts))
+                      for i in range(len(starts[p])-1)
+                        for j in range(i+1, len(ends[p]))
+               ), reverse=True)
+            ))[:n]
+
+def format_bidaf( output, par, mp_logit ):
+    span = output['best_span']
+    span.insert(0, par)
+
+    return {
+       'span': span,
+       'text': output['best_span_str'],
+       'logit': output['span_start_logits'][span[1]] + output['span_end_logits'][span[2]],
+       'mp_logit': mp_logit
+    }
+
 def _run(predictors: list,
          input_file: IO,
          output_file: Optional[IO],
          batch_size: int,
-         print_to_console: bool) -> None:
+         print_to_console: bool,
+         top_n: 1) -> None:
 
     predictor = predictors[0]
     bidaf_predictor = predictors[1]
@@ -126,22 +164,40 @@ def _run(predictors: list,
             results = predictor.predict_batch_json(batch_data)
 
         for model_input, output in zip(batch_data, results):
-            data = {}
-            data['question'] = model_input['question']
-            data['passage'] = output['best_para']
+            logger.info( "Model-reported best span %s" % output['best_span'] )
 
-            logger.info("Running BiDAF")
-            result = bidaf_predictor.predict_json(data)
+            top = top_spans( output['paragraph_span_start_logits'], output['paragraph_span_end_logits'], top_n )
+            logger.info( "Derived top %d spans %s" % (top_n, top) )
+
+            data = [ {
+                'question': model_input['question'],
+                'passage': model_input['passages'][t[1]]
+            } for t in top ]
+
+            data.append( {
+                'question': model_input['question'],
+                'passage': ' '.join( model_input['passages'] )
+            } )
+
+            logger.info("Running BiDAF for %d options" % len(data))
+            results = bidaf_predictor.predict_batch_json(data)
             logger.info("BiDAF complete")
-            string_output1 = bidaf_predictor.dump_line(result)
-            string_output = predictor.dump_line(output)
-            if print_to_console:
-                #print("MP input: ", model_input)
-                #print("MP prediction: ", string_output)
-                print("BIDAF input: ", data)
-                #print("BIDAF prediction: ", string_output1)
+
+            results = {
+               'passages': model_input['passages'],
+               'question': model_input['question'],
+               'MP': { 'span': output['best_span'], 'text': output['best_span_str'], 'logit': top[0][0] },
+               'BiDAF': format_bidaf( results[-1], -1, -1 ),
+               'MP+BiDAF': [ format_bidaf( results[p], top[p][1], top[p][0] ) for p in range(len(results)-1) ]
+            }
+
             if output_file:
-                output_file.write(string_output + "\n" + string_output1 + "\r\n")
+                output_file.write(json.dumps(results))
+
+            print( "Question\t%s" % model_input['question'] )
+            print( "MP\t\t%s" % json.dumps( results['MP'] ) )
+            print( "BiDAF\t\t%s" % json.dumps( results['BiDAF'] ) )
+            print( "MP+BiDAF\t%s" % json.dumps( results['MP+BiDAF'] ) )
 
     batch_json_data = []
     for line in input_file:
@@ -178,4 +234,5 @@ def _predict(args: argparse.Namespace) -> None:
              input_file,
              output_file,
              args.batch_size,
-             not args.silent)
+             not args.silent,
+             args.try_top)
