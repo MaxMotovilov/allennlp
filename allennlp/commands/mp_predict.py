@@ -110,26 +110,19 @@ def _get_predictors(args: argparse.Namespace) -> list:
 
     return Predictors
 
-def uniquePar():
-    s = set()
-    def test( item ):
-        if item[1] in s: return False
-        s.add( item[1] )
-        return True
-    return test
-
 def top_spans( starts, ends, n ):
-# O( N log N ) where N = Np * Lp * (Lp-1) / 2
     assert len(starts) == len(ends)
-    return list(filter(
-               uniquePar(),
-               sorted((
-                  (starts[p][i] + ends[p][j], p, i, j)
-                    for p in range(len(starts))
-                      for i in range(len(starts[p])-1)
-                        for j in range(i+1, len(ends[p]))
-               ), reverse=True)
-            ))[:n]
+    return sorted(
+              (
+                max(
+		          (
+                     (starts[p][i] + ends[p][j], p, i, j)
+                       for i in range(len(starts[p]))
+                         for j in range(i, len(ends[p]))
+                  )
+                ) for p in range(len(starts))
+              ), reverse=True
+            )[:n]
 
 def format_bidaf( output, par, mp_logit ):
     span = output['best_span']
@@ -168,6 +161,7 @@ def _run(predictors: list,
 
             top = top_spans( output['paragraph_span_start_logits'], output['paragraph_span_end_logits'], top_n )
             logger.info( "Derived top %d spans %s" % (top_n, top) )
+            assert list( top[0][1:] ) == output['best_span']
 
             data = [ {
                 'question': model_input['question'],
