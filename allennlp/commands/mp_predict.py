@@ -53,7 +53,32 @@ from allennlp.common.checks import check_for_gpu
 from allennlp.models.archival import load_archive
 from allennlp.predictors import Predictor
 
+from overrides import overrides
+from allennlp.training.metrics import SquadEmAndF1
+from allennlp.common import squad_eval
+
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
+
+def metric_max_over_predictions(metric_fn, predictions, ground_truth):
+    return max( (
+        metric_fn(prediction, ground_truth)
+          for prediction in predictions
+    ) )
+
+class MagicGuessEmAndF1(SquadEmAndF1):
+    @overrides
+    def __call__(self, best_span_strings, answer_string):
+        exact_match = metric_max_over_predictions(
+                squad_eval.exact_match_score,
+                best_span_strings,
+                answer_string)
+        f1_score = metric_max_over_predictions(
+                squad_eval.f1_score,
+                best_span_strings,
+                answer_string)
+        self._total_em += exact_match
+        self._total_f1 += f1_score
+        self._count += 1
 
 class PredictMP(Subcommand):
     def add_subparser(self, name: str, parser: argparse._SubParsersAction) -> argparse.ArgumentParser:
@@ -135,6 +160,11 @@ def format_bidaf( output, par, mp_logit ):
        'mp_logit': mp_logit
     }
 
+def log_metrics( label, metrics ):
+    em, f1 = metrics.get_metric()
+    if em > 0 and f1 > 0:
+        logger.info( "%s: em=%g, f1=%g" % (label, em, f1) )
+
 def _run(predictors: list,
          input_file: IO,
          output_file: Optional[IO],
@@ -144,6 +174,11 @@ def _run(predictors: list,
 
     predictor = predictors[0]
     bidaf_predictor = predictors[1]
+
+    mp_metrics = SquadEmAndF1()
+    bidaf_metrics = SquadEmAndF1()
+    mp_bidaf_top_metrics = SquadEmAndF1()
+    mp_bidaf_any_metrics = MagicGuessEmAndF1()
 
     def _run_predictor(batch_data):
         if len(batch_data) == 1:
@@ -188,7 +223,19 @@ def _run(predictors: list,
             if output_file:
                 output_file.write(json.dumps(results))
 
+            if 'answer' in model_input:
+                answer = model_input['answer']
+                results['answer'] = answer
+                mp_metrics( results['MP']['text'], [answer] )
+                bidaf_metrics( results['BiDAF']['text'], [answer] )
+                mp_bidaf_top_metrics( results['MP+BiDAF'][0]['text'], [answer] )
+                mp_bidaf_any_metrics( [r['text'] for r in results['MP+BiDAF']], answer )
+
             print( "Question\t%s" % model_input['question'] )
+
+            if 'answer' in model_input:
+                print( "Answer\t\t%s" % answer )
+
             print( "MP\t\t%s" % json.dumps( results['MP'] ) )
             print( "BiDAF\t\t%s" % json.dumps( results['BiDAF'] ) )
             print( "MP+BiDAF\t%s" % json.dumps( results['MP+BiDAF'] ) )
@@ -208,6 +255,10 @@ def _run(predictors: list,
     if batch_json_data:
         _run_predictor(batch_json_data)
 
+    log_metrics( 'MP', mp_metrics )
+    log_metrics( 'BiDAF', bidaf_metrics )
+    log_metrics( 'MP+BiDAF: top', mp_bidaf_top_metrics )
+    log_metrics( 'MP+BiDAF: any', mp_bidaf_any_metrics )
 
 def _predict(args: argparse.Namespace) -> None:
     predictors = _get_predictors(args)
