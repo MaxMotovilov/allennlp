@@ -178,6 +178,7 @@ def _run(predictors: list,
     mp_metrics = SquadEmAndF1()
     bidaf_metrics = SquadEmAndF1()
     mp_bidaf_top_metrics = SquadEmAndF1()
+    mp_bidaf_slice_metrics = SquadEmAndF1()
     mp_bidaf_any_metrics = MagicGuessEmAndF1()
 
     def _run_predictor(batch_data):
@@ -198,13 +199,27 @@ def _run(predictors: list,
             logger.info( "Derived top %d spans %s" % (top_n, top) )
             assert list( top[0][1:] ) == output['best_span']
 
+            question = model_input['question']
+
             data = [ {
-                'question': model_input['question'],
+                'question': question,
                 'passage': model_input['passages'][t[1]]
             } for t in top ]
 
             data.append( {
-                'question': model_input['question'],
+                'question': question,
+                'passage': ' '.join(
+                    model_input['passages'][
+                      slice(
+                         min( (t[1] for t in top) ),
+                         1+max( (t[1] for t in top) )
+                      )
+                    ]
+                 )
+            } )
+
+            data.append( {
+                'question': question,
                 'passage': ' '.join( model_input['passages'] )
             } )
 
@@ -217,7 +232,8 @@ def _run(predictors: list,
                'question': model_input['question'],
                'MP': { 'span': output['best_span'], 'text': output['best_span_str'], 'logit': top[0][0] },
                'BiDAF': format_bidaf( results[-1], -1, -1 ),
-               'MP+BiDAF': [ format_bidaf( results[p], top[p][1], top[p][0] ) for p in range(len(results)-1) ]
+               'MP+slice+BiDAF': format_bidaf( results[-2], -1, -1 ),
+               'MP+BiDAF': [ format_bidaf( results[p], top[p][1], top[p][0] ) for p in range(len(results)-2) ]
             }
 
             if output_file:
@@ -228,6 +244,7 @@ def _run(predictors: list,
                 results['answer'] = answer
                 mp_metrics( results['MP']['text'], [answer] )
                 bidaf_metrics( results['BiDAF']['text'], [answer] )
+                mp_bidaf_slice_metrics( results['MP+slice+BiDAF']['text'], [answer] )
                 mp_bidaf_top_metrics( results['MP+BiDAF'][0]['text'], [answer] )
                 mp_bidaf_any_metrics( [r['text'] for r in results['MP+BiDAF']], answer )
 
@@ -238,7 +255,8 @@ def _run(predictors: list,
 
             print( "MP\t\t%s" % json.dumps( results['MP'] ) )
             print( "BiDAF\t\t%s" % json.dumps( results['BiDAF'] ) )
-            print( "MP+BiDAF\t%s" % json.dumps( results['MP+BiDAF'] ) )
+            print( "MP+BiDAF (slc)\t%s" % json.dumps( results['MP+slice+BiDAF'] ) )
+            print( "MP+BiDAF (par)\t%s" % json.dumps( results['MP+BiDAF'] ) )
 
     batch_json_data = []
     for line in input_file:
@@ -257,6 +275,7 @@ def _run(predictors: list,
 
     log_metrics( 'MP', mp_metrics )
     log_metrics( 'BiDAF', bidaf_metrics )
+    log_metrics( 'MP+BiDAF: slice', mp_bidaf_slice_metrics )
     log_metrics( 'MP+BiDAF: top', mp_bidaf_top_metrics )
     log_metrics( 'MP+BiDAF: any', mp_bidaf_any_metrics )
 
